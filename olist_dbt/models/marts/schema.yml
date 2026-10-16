@@ -1,0 +1,69 @@
+version: 2
+
+models:
+  - name: dim_customers
+    columns:
+      - name: customer_key
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_products
+    columns:
+      - name: product_key
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_sellers
+    columns:
+      - name: seller_key
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_dates
+    columns:
+      - name: date_key
+        tests:
+          - unique
+          - not_null
+
+  - name: fact_orders
+    columns:
+      - name: customer_key
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_key
+      - name: product_key
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_products')
+                field: product_key
+      - name: seller_key
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_sellers')
+                field: seller_key
+      - name: purchase_date_key
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_dates')
+                field: date_key
+      - name: delivered_customer_date_key
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_dates')
+                field: date_key
+      - name: estimated_delivery_date_key
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_dates')
+                field: date_key

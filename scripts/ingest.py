@@ -34,14 +34,33 @@ def read_data(file_path):
 def load_to_raw(data, table_name, engine):
     data.to_sql(table_name, con=engine, schema="raw", if_exists="replace", index=False)
 
+CHUNK_SIZE = 200_000
+
+def load_csv_in_chunks(file_path, table_name, engine):
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    dtype_map = {col: str for col in string_columns}
+    total = 0
+    for i, chunk in enumerate(pd.read_csv(file_path, dtype=dtype_map, chunksize=CHUNK_SIZE)):
+        chunk.to_sql(
+            table_name,
+            con=engine,
+            schema="raw",
+            if_exists="replace" if i == 0 else "append",
+            index=False,
+        )
+        total += len(chunk)
+    logger.info(f"Loaded {total} rows into raw.{table_name} from {file_path.name}")
+
 if __name__ == "__main__":
     engine = get_engine()
     create_schema(engine, "raw")
     for file_name, table_name in file_table_mapping.items():
         file_path = file_directory / file_name
         try:
-            data = read_data(file_path)
-            load_to_raw(data, table_name, engine)
+            # data = read_data(file_path)
+            load_csv_in_chunks(file_path, table_name, engine)
+            # load_to_raw(data, table_name, engine)
             logger.info(f"Data loaded successfully into table {table_name} from file {file_name}")
         except Exception as e:
             logger.error(f"Error processing file {file_name}: {e}")

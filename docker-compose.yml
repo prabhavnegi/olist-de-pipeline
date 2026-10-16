@@ -14,9 +14,72 @@ services:
       - ./sql:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
-      interval: 10s
+      interval: 20s
       timeout: 5s
-      retries: 5
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+
+  airflow-db:
+    image: postgres:15.3-alpine
+    container_name: olist-airflow-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 200M
+
+  airflow:
+    build: ./airflow
+    container_name: olist-airflow
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-db:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      DBT_PROFILES_DIR: /opt/airflow/project/airflow/dbt_profiles
+      
+      # LOW-RESOURCE TUNING
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 10      # Increased from 2 to 10
+      AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: 5     # Increased from 0 to 5
+      AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: 10
+      AIRFLOW__SCHEDULER__PARSING_PROCESSES: 1
+      AIRFLOW__CORE__PARALLELISM: 2
+      
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - .:/opt/airflow/project
+    command: ["airflow", "standalone"]
+    deploy:
+      resources:
+        limits:
+          memory: 1500M
 
 volumes:
   postgres_data:
+  airflow_db_data:
