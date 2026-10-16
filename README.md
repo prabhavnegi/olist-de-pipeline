@@ -54,10 +54,10 @@ Surrogate keys are generated with `row_number()` in the dbt mart models.
 
 **Memory-safe ingestion.** The first version loaded each CSV in one shot and was OOM-killed (exit -9) under a ~2.5 GB WSL memory limit. Ingestion now reads CSVs in chunks.
 
-**Airflow resource usage.** Out of the box, the Airflow stack was consuming ~6 GB of RAM, which is too much for a laptop running WSL with a ~2.5 GB limit. I brought it down to about [X GB] by:
+**Airflow resource usage.** Out of the box, the Airflow stack was consuming ~6 GB of RAM, which is too much for a laptop running WSL with a ~2.5 GB limit. I brought it down to about 2.4 GB by:
 - Using `LocalExecutor` instead of CeleryExecutor, which removes the Redis broker and Celery worker containers
-- Setting `mem_limit` on each service in `docker-compose.yml` (e.g. [scheduler: X MB, webserver: X MB, postgres: X MB])
-- Lowering scheduler and DAG parallelism: `AIRFLOW__CORE__PARALLELISM=[N]`, `AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG=[N]`, `AIRFLOW__WEBSERVER__WORKERS=[N]`
+- Setting `mem_limit` on each service in `docker-compose.yml`.
+- Lowering scheduler and DAG parallelism: `AIRFLOW__CORE__PARALLELISM: 2`, `AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 10`, `AIRFLOW__SCHEDULER__PARSING_PROCESSES: 1`
 - Disabling example DAGs (`AIRFLOW__CORE__LOAD_EXAMPLES=False`)
 - Running only one DAG at a time with sequential tasks (`ingest_raw >> dbt_run >> dbt_test`)
 
