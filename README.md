@@ -1,86 +1,139 @@
-# olist-de-pipeline
+# Olist E-commerce Data Pipeline
 
-An end-to-end ELT pipeline for the [Olist Brazilian E-commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce):
-raw CSVs → Postgres raw layer → a Kimball-style star schema for analytics.
+An end-to-end data engineering pipeline built on the [Olist Brazilian E-commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) (9 CSVs, ~100k orders). Raw files are loaded into PostgreSQL, modeled into a star schema with dbt, tested, and orchestrated daily with Airflow. Everything runs locally via Docker Compose.
+
+![Airflow DAG](docs/airflow_dag.png)
 
 ## Architecture
 
 ```
-9 CSVs  --ingest.py-->  raw.* tables (Postgres)  --transform.py-->  mart.* star schema
+Olist CSVs (9 files)
+      │
+      ▼
+ ingest.py  (pandas + SQLAlchemy, chunked load)
+      │
+      ▼
+ PostgreSQL  ── raw schema (9 tables, as-is)
+      │
+      ▼
+ dbt staging  ── 8 stg_ models (cleaning, typing, renaming)
+      │
+      ▼
+ dbt marts    ── star schema
+      │          fact_orders
+      │          dim_customers · dim_products · dim_sellers · dim_dates
+      ▼
+ dbt tests    ── not_null, unique, accepted values, relationships (21 tests)
+
+ Orchestrated by Airflow:  ingest_raw >> dbt_run >> dbt_test
 ```
 
-**Extract + Load (`raw` schema):** `scripts/ingest.py` reads all 9 source CSVs and loads
-each into its own table under `raw.*`, close to as-is (mostly text-typed, no constraints).
-This is the landing zone — disposable and fully rebuildable from the CSVs at any time.
+## Tech stack
 
-**Transform (`mart` schema):** `scripts/transform.py` reads from `raw.*`, deduplicates,
-joins, and aggregates, then writes into a star schema:
+| Layer | Tool |
+|---|---|
+| Storage / warehouse | PostgreSQL |
+| Ingestion | Python, pandas, SQLAlchemy |
+| Transformation | dbt (dbt-postgres) |
+| Orchestration | Apache Airflow (LocalExecutor) |
+| Containerization | Docker, Docker Compose |
 
-- `dim_customers`, `dim_products` (joined with English category translations),
-  `dim_sellers`, `dim_dates` — descriptive dimensions with surrogate keys
-- `fact_orders` — one row per order line item, with foreign keys into every dimension,
-  plus price, freight, aggregated payment info, and review score
+## Data model
 
-Grain of `fact_orders`: **one row per order line item** (one product within one order).
+**Fact table**
+- `fact_orders`: one row per order line item (~112,650 rows). Includes price, freight, delivery timestamps, payment type/installments, and allocated payment value.
 
-## Setup
+**Dimensions**
+- `dim_customers`, `dim_products` (with English category names), `dim_sellers`, `dim_dates`
 
+Surrogate keys are generated with `row_number()` in the dbt mart models.
+
+## Design decisions and challenges
+
+**Fact-table fan-out bug.** In the raw data, `payment_value` lives at the *order* level, but the fact table is at the *line-item* level. Joining them naively repeats the full order payment on every item, so `SUM(payment_value)` is inflated for multi-item orders. Fix: in the dbt `fact_orders`, payment value is allocated across line items proportionally to price, with the rounding remainder assigned to the last item. Verified against `raw.order_payments` with zero mismatched orders.
+
+**Memory-safe ingestion.** The first version loaded each CSV in one shot and was OOM-killed (exit -9) under a ~2.5 GB WSL memory limit. Ingestion now reads CSVs in chunks.
+
+**Airflow resource usage.** Out of the box, the Airflow stack was consuming ~6 GB of RAM, which is too much for a laptop running WSL with a ~2.5 GB limit. I brought it down to about [X GB] by:
+- Using `LocalExecutor` instead of CeleryExecutor, which removes the Redis broker and Celery worker containers
+- Setting `mem_limit` on each service in `docker-compose.yml` (e.g. [scheduler: X MB, webserver: X MB, postgres: X MB])
+- Lowering scheduler and DAG parallelism: `AIRFLOW__CORE__PARALLELISM=[N]`, `AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG=[N]`, `AIRFLOW__WEBSERVER__WORKERS=[N]`
+- Disabling example DAGs (`AIRFLOW__CORE__LOAD_EXAMPLES=False`)
+- Running only one DAG at a time with sequential tasks (`ingest_raw >> dbt_run >> dbt_test`)
+
+**Isolated environments.** dbt and the ingest script run in separate virtualenvs inside the Airflow image to avoid dependency conflicts.
+
+**Pandas vs dbt.** The star schema was first built in pandas (`transform.py`) and then re-implemented in dbt. Row counts were verified to match (112,650 fact rows; 2,454 null delivery dates). The dbt version is the source of truth, since it contains the payment fan-out fix. The pandas version is kept for reference.
+
+## Data quality
+
+dbt tests run after every build as the final DAG task:
+- `not_null` and `unique` on primary keys
+- `relationships` tests between the fact table and every dimension
+- 21 tests in total, all passing
+
+## Running it locally
+
+**Prerequisites:** Docker + Docker Compose, ~4 GB RAM available to Docker.
+
+1. Clone the repo
+   ```bash
+   git clone https://github.com/<your-username>/olist-de-pipeline.git
+   cd olist-de-pipeline
+   ```
+2. Download the dataset from [Kaggle](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) and place the 9 CSVs in `data/` (gitignored).
+3. Copy the env file and adjust credentials if needed
+   ```bash
+   cp .env.example .env
+   ```
+4. Start the stack
+   ```bash
+   docker compose up -d
+   ```
+5. Open Airflow at http://localhost:8080, enable the `olist_pipeline` DAG, and trigger it.
+6. Query the results in Postgres (schemas: `raw` for ingested tables, `dbt_dev` for the dbt staging and mart models, and `mart` for the original pandas-built star schema kept for reference).
+
+To run dbt manually:
 ```bash
-git clone <this repo>
-cd olist-de-pipeline
-python -m venv venv && source venv/bin/activate   # venv\Scripts\activate on Windows
-pip install -r requirements.txt
-
-# Download the 9 CSVs from Kaggle and place them in data/raw/
-# https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce
-
-cp .env.example .env      # edit with your local Postgres credentials
-docker compose up -d      # starts Postgres
+cd olist_dbt
+dbt run && dbt test
 ```
 
-## Run
+## Repository structure
 
-```bash
-# 1. Create the mart (star schema) tables
-docker exec -i olist-postgres psql -U postgres -d olist < sql/02_create_star_schema.sql
-
-# 2. Load raw CSVs into Postgres (also creates the raw schema/tables)
-cd scripts && python -m ingest
-
-# 3. Build the star schema from the raw layer
-python -m transform
+```
+olist-de-pipeline/
+├── dags/                 # Airflow DAG (olist_pipeline)
+├── ingest/               # db.py (engine helpers), ingest.py (chunked loader)
+├── transform.py          # original pandas star-schema build (reference)
+├── olist_dbt/            # dbt project: staging + mart models, tests
+├── docs/                 # architecture and DAG screenshots
+├── docker-compose.yml
+├── requirements.txt
+└── README.md
 ```
 
-## Schema notes / design decisions
+## Example query
 
-- **Surrogate keys** (`customer_key`, `product_key`, etc.) are auto-incrementing integers
-  generated in the warehouse, separate from the natural keys (`customer_id`, etc.) used
-  by the source system — standard Kimball dimensional modeling practice.
-- **`dim_dates`** is a generated calendar dimension (one row per day) rather than storing
-  raw timestamps in the fact table — lets queries `GROUP BY` on year/quarter/weekend
-  without repeating date-math logic in every query.
-- **Split payments**: an order can have multiple payment rows (e.g. part voucher, part
-  credit card). `payment_value` is summed across all of an order's payments;
-  `payment_type`/`payment_installments` are taken from the single largest payment row
-  (via `idxmax()`) so the two values stay consistent with each other rather than being
-  aggregated independently.
-- **Multiple reviews per order**: some orders have more than one review submitted at
-  different times. The most recent review (by answer timestamp) is kept.
-- **Undelivered/cancelled orders** have a `NULL` `delivered_customer_date_key` — left
-  null rather than backfilled with a placeholder, since no delivery genuinely happened.
+Revenue by product category:
 
-## Status / roadmap
+```sql
+SELECT p.category_name_english,
+       ROUND(SUM(f.payment_value), 2) AS revenue
+FROM dbt_dev.fact_orders f
+JOIN dbt_dev.dim_products p ON f.product_key = p.product_key
+GROUP BY 1
+ORDER BY revenue DESC
+LIMIT 10;
+```
 
-- [x] Raw ingestion (9 CSVs → Postgres)
-- [x] Star schema transform (pandas)
-- [ ] dbt models (staging + mart, with tests) — replacing the pandas transform
-- [ ] Airflow DAG to orchestrate ingest → transform on a schedule
-- [ ] Docker Compose for the full stack (Postgres + Airflow + pipeline)
-- [ ] Raw file backup to GCS
+## What I'd add next
 
-## Why this project
+- Incremental dbt models instead of full refresh
+- Raw-file backup layer in cloud object storage
+- Data freshness checks and Airflow failure alerts
+- A BI dashboard on top of the mart layer
 
-Built to demonstrate core data engineering skills — dimensional modeling, ELT from
-messy multi-table source data into an analytics-ready star schema, and handling
-real-world data quality issues (split payments, duplicate reviews, missing delivery
-dates) — using a realistic e-commerce dataset.
+## Author
+
+Prabhav Singh Negi · [LinkedIn](https://linkedin.com/in/prabhav-negi)
